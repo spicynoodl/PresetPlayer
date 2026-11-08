@@ -5,14 +5,17 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check layout
+      - name: Find project folder
         run: |
-          ls -R . | head -50
-          test -d Sources || (echo "ERROR: Sources folder must be at the repo root" && exit 1)
-          test -f project.yml || (echo "ERROR: project.yml must be at the repo root" && exit 1)
+          if [ -f project.yml ]; then echo "APP_DIR=." >> $GITHUB_ENV
+          elif [ -f PresetPlayer/project.yml ]; then echo "APP_DIR=PresetPlayer" >> $GITHUB_ENV
+          else echo "project.yml not found"; ls -R . | head -50; exit 1; fi
       - run: brew install xcodegen
-      - run: xcodegen generate
+      - name: Generate project
+        working-directory: ${{ env.APP_DIR }}
+        run: xcodegen generate
       - name: Build
+        working-directory: ${{ env.APP_DIR }}
         run: |
           xcodebuild -project PresetPlayer.xcodeproj -scheme PresetPlayer \
             -configuration Release -sdk iphoneos -derivedDataPath build \
@@ -23,4 +26,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PresetPlayer-ipa
-          path: PresetPlayer.ipa
+          path: ${{ env.APP_DIR }}/PresetPlayer.ipa
