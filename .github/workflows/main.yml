@@ -1,0 +1,26 @@
+name: Build unsigned IPA
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check layout
+        run: |
+          ls -R . | head -50
+          test -d Sources || (echo "ERROR: Sources folder must be at the repo root" && exit 1)
+          test -f project.yml || (echo "ERROR: project.yml must be at the repo root" && exit 1)
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Build
+        run: |
+          xcodebuild -project PresetPlayer.xcodeproj -scheme PresetPlayer \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/PresetPlayer.app Payload/
+          zip -r PresetPlayer.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PresetPlayer-ipa
+          path: PresetPlayer.ipa
