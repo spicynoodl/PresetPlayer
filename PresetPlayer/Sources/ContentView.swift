@@ -72,11 +72,19 @@ struct LibraryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) { MiniPlayer() }
-            .fileImporter(isPresented: $showImporter,
+                        .fileImporter(isPresented: $showImporter,
                           allowedContentTypes: [.audio, .folder],
                           allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result { lib.importItems(urls) }
+                switch result {
+                case .success(let urls): lib.importItems(urls)
+                case .failure(let e): lib.report = "Picker error: \(e.localizedDescription)"
+                }
             }
+            .alert("Import",
+                   isPresented: Binding(get: { lib.report != nil },
+                                        set: { if !$0 { lib.report = nil } })) {
+                Button("OK") {}
+            } message: { Text(lib.report ?? "") }
         }
     }
 }
