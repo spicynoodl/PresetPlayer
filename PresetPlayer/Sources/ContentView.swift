@@ -28,11 +28,16 @@ func formatTime(_ s: Double) -> String {
 }
 
 // MARK: Library
+enum ImportMode { case files, folder }
+
 struct LibraryView: View {
     @EnvironmentObject var lib: Library
     @EnvironmentObject var player: AudioPlayer
     @State private var search = ""
     @State private var showImporter = false
+    @State private var importMode: ImportMode = .files
+
+    var importTypes: [UTType] { importMode == .folder ? [.folder] : [.item] }
 
     var filtered: [Track] {
         search.isEmpty ? lib.tracks
@@ -66,14 +71,15 @@ struct LibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Button("Add files or folder…") { showImporter = true }
+                        Button("Add files…") { importMode = .files; showImporter = true }
+                        Button("Add folder…") { importMode = .folder; showImporter = true }
                         Button("Rescan") { lib.rescan() }
                     } label: { Image(systemName: "plus") }
                 }
             }
             .safeAreaInset(edge: .bottom) { MiniPlayer() }
-                        .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [.audio, .folder],
+            .fileImporter(isPresented: $showImporter,
+                          allowedContentTypes: importTypes,
                           allowsMultipleSelection: true) { result in
                 switch result {
                 case .success(let urls): lib.importItems(urls)
@@ -195,8 +201,11 @@ struct EQView: View {
             }
             .navigationTitle("Equalizer")
             .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [.json, .plainText]) { result in
-                if case .success(let url) = result { player.importPreset(url) }
+                          allowedContentTypes: [.item]) { result in
+                switch result {
+                case .success(let url): player.importPreset(url)
+                case .failure(let e): player.message = "Picker error: \(e.localizedDescription)"
+                }
             }
             .alert("Save preset", isPresented: $showSave) {
                 TextField("Name", text: $newName)
