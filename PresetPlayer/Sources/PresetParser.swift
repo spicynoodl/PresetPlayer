@@ -80,7 +80,7 @@ enum PresetParser {
             case "notch": type = .notch
             default: type = .peak
             }
-            let muted = (b["mute"] as? Bool) ?? false
+            let muted = ((b["mute"] as? Bool) ?? false) || t == "off"
             bands.append(Band(type: type,
                               freq: (b["frequency"] as? NSNumber)?.floatValue ?? 1000,
                               gain: (b["gain"] as? NSNumber)?.floatValue ?? 0,
