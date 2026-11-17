@@ -78,14 +78,11 @@ struct LibraryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) { MiniPlayer() }
-            .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: importTypes,
-                          allowsMultipleSelection: true) { result in
-                switch result {
-                case .success(let urls): lib.importItems(urls)
-                case .failure(let e): lib.report = "Picker error: \(e.localizedDescription)"
-                }
-            }
+            .sheet(isPresented: $showImporter) {
+    DocumentPicker(folder: importMode == .folder,
+                   onPick: { urls in lib.importItems(urls) },
+                   onDone: { showImporter = false })
+}
             .alert("Import",
                    isPresented: Binding(get: { lib.report != nil },
                                         set: { if !$0 { lib.report = nil } })) {
@@ -201,8 +198,8 @@ struct EQView: View {
             }
             .navigationTitle("Equalizer")
             .sheet(isPresented: $showImporter) {
-    DocumentPicker(folder: importMode == .folder,
-                   onPick: { urls in lib.importItems(urls) },
+    DocumentPicker(folder: false, multiple: false,
+                   onPick: { urls in if let u = urls.first { player.importPreset(u) } },
                    onDone: { showImporter = false })
 }
             .alert("Save preset", isPresented: $showSave) {
