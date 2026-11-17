@@ -200,13 +200,11 @@ struct EQView: View {
                 }
             }
             .navigationTitle("Equalizer")
-            .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [.item]) { result in
-                switch result {
-                case .success(let url): player.importPreset(url)
-                case .failure(let e): player.message = "Picker error: \(e.localizedDescription)"
-                }
-            }
+            .sheet(isPresented: $showImporter) {
+    DocumentPicker(folder: importMode == .folder,
+                   onPick: { urls in lib.importItems(urls) },
+                   onDone: { showImporter = false })
+}
             .alert("Save preset", isPresented: $showSave) {
                 TextField("Name", text: $newName)
                 Button("Save") { player.saveCurrent(as: newName) }
