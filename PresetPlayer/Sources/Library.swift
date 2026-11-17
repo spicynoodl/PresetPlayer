@@ -7,6 +7,9 @@ final class Library: ObservableObject {
     @Published var report: String?
 
     static let audioExts: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "aif", "aiff", "aifc", "caf", "mp4", "alac"]
+    // Files with these extensions are never audio; skip them without copying (cover art, playlists, etc.)
+    static let ignoredExts: Set<String> = ["jpg", "jpeg", "png", "gif", "heic", "webp", "txt", "m3u", "m3u8", "cue",
+                                           "log", "pdf", "nfo", "db", "ini", "lrc", "json", "xml", "url", "sfv", "md5"]
 
     static var musicDir: URL {
         let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -21,7 +24,8 @@ final class Library: ObservableObject {
             var urls: [URL] = []
             if let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil,
                                                        options: [.skipsHiddenFiles]) {
-                for case let u as URL in en where Library.audioExts.contains(u.pathExtension.lowercased()) {
+                for case let u as URL in en where Library.audioExts.contains(u.pathExtension.lowercased())
+                    && !u.lastPathComponent.hasPrefix("._") {
                     urls.append(u)
                 }
             }
@@ -39,6 +43,13 @@ final class Library: ObservableObject {
         }
     }
 
+    private enum ImportResult {
+        case copied
+        case ignored
+        case notAudio(String)
+        case failed(String)
+    }
+
     func importItems(_ urls: [URL]) {
         isImporting = true
         DispatchQueue.global(qos: .userInitiated).async {
@@ -48,28 +59,34 @@ final class Library: ObservableObject {
             var failed: [String] = []
 
             func process(_ f: URL, destDir: URL) {
-                let n = Library.destName(for: f)
-                if n.isEmpty { skipped.append(Library.describe(f)); return }
-                if let err = Library.copy(f, to: destDir.appendingPathComponent(n)) {
-                    failed.append("\(n): \(err)")
-                } else {
-                    copied += 1
+                let name = f.lastPathComponent
+                if name.hasPrefix("._") { return }
+                switch Library.importOne(f, destDir: destDir) {
+                case .copied: copied += 1
+                case .ignored: break
+                case .notAudio(let d): skipped.append(d)
+                case .failed(let e): failed.append("\(name): \(e)")
                 }
             }
 
             for url in urls {
                 let access = url.startAccessingSecurityScopedResource()
                 var isDir: ObjCBool = false
-                fm.fileExists(atPath: url.path, isDirectory: &isDir)
-                if isDir.boolValue {
+                let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
+                if !exists {
+                    failed.append("\(url.lastPathComponent): cannot be read")
+                } else if isDir.boolValue {
+                    let base = url.resolvingSymlinksInPath().path
                     let destRoot = Library.musicDir.appendingPathComponent(url.lastPathComponent, isDirectory: true)
                     if let en = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey],
                                               options: [.skipsHiddenFiles]) {
                         for case let f as URL in en {
-                            if let v = try? f.resourceValues(forKeys: [.isDirectoryKey]), v.isDirectory == true { continue }
-                            let rel = f.path.replacingOccurrences(of: url.path + "/", with: "")
+                            if (try? f.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { continue }
+                            let fp = f.resolvingSymlinksInPath().path
+                            let rel = fp.hasPrefix(base + "/") ? String(fp.dropFirst(base.count + 1)) : f.lastPathComponent
                             let relDir = (rel as NSString).deletingLastPathComponent
-                            process(f, destDir: destRoot.appendingPathComponent(relDir))
+                            let dest = relDir.isEmpty ? destRoot : destRoot.appendingPathComponent(relDir, isDirectory: true)
+                            process(f, destDir: dest)
                         }
                     }
                 } else {
@@ -93,12 +110,41 @@ final class Library: ObservableObject {
         }
     }
 
-    // File name to save as, or "" if the file isn't audio.
-    private static func destName(for src: URL) -> String {
+    private static func importOne(_ src: URL, destDir: URL) -> ImportResult {
+        let fm = FileManager.default
         let name = src.lastPathComponent
-        if audioExts.contains(src.pathExtension.lowercased()) { return name }
-        if let ext = detectExtension(src) { return name + "." + ext }
-        return ""
+        let ext = src.pathExtension.lowercased()
+        let known = audioExts.contains(ext)
+        if !known && ignoredExts.contains(ext) { return .ignored }
+        do { try fm.createDirectory(at: destDir, withIntermediateDirectories: true) }
+        catch { return .failed(error.localizedDescription) }
+
+        if known {
+            let dst = destDir.appendingPathComponent(name)
+            if fm.fileExists(atPath: dst.path) { return .copied }
+            if let e = coordinatedCopy(src, to: dst) { return .failed(e) }
+            return .copied
+        }
+
+        // Unknown or missing extension: copy to a temp file, look at the bytes, then name it properly.
+        let tmp = destDir.appendingPathComponent(".import-" + UUID().uuidString)
+        if let e = coordinatedCopy(src, to: tmp) { return .failed(e) }
+        guard let detected = detectExtension(tmp) else {
+            let d = describe(tmp, name: name)
+            try? fm.removeItem(at: tmp)
+            return .notAudio(d)
+        }
+        let final = destDir.appendingPathComponent(name + "." + detected)
+        if fm.fileExists(atPath: final.path) {
+            try? fm.removeItem(at: tmp)
+        } else {
+            do { try fm.moveItem(at: tmp, to: final) }
+            catch {
+                try? fm.removeItem(at: tmp)
+                return .failed(error.localizedDescription)
+            }
+        }
+        return .copied
     }
 
     // Looks at the first bytes of the file to work out its format.
@@ -123,7 +169,7 @@ final class Library: ObservableObject {
         return nil
     }
 
-    private static func describe(_ u: URL) -> String {
+    private static func describe(_ u: URL, name: String) -> String {
         var hex = "cannot read file"
         if let h = try? FileHandle(forReadingFrom: u) {
             if let d = try? h.read(upToCount: 8) {
@@ -131,18 +177,43 @@ final class Library: ObservableObject {
             }
             try? h.close()
         }
-        return "\(u.lastPathComponent) [\(hex)]"
+        return "\(name) [\(hex)]"
     }
 
-    private static func copy(_ src: URL, to dst: URL) -> String? {
+    // Copies through NSFileCoordinator so files from VLC / iCloud / other providers are fully available first.
+    private static func coordinatedCopy(_ src: URL, to dst: URL) -> String? {
         let fm = FileManager.default
-        do {
-            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !fm.fileExists(atPath: dst.path) { try fm.copyItem(at: src, to: dst) }
-            return nil
-        } catch {
-            return error.localizedDescription
+        var coordError: NSError?
+        var copyError: String?
+        NSFileCoordinator().coordinate(readingItemAt: src, options: [], error: &coordError) { readURL in
+            do { try fm.copyItem(at: readURL, to: dst) }
+            catch { copyError = error.localizedDescription }
         }
+        if let e = coordError { return e.localizedDescription }
+        return copyError
+    }
+
+    private struct Meta {
+        var title: String?
+        var artist: String?
+        var album: String?
+        var duration: Double
+    }
+
+    private static func readMetadata(_ url: URL) async -> Meta {
+        let asset = AVURLAsset(url: url)
+        var m = Meta(title: nil, artist: nil, album: nil, duration: 0)
+        if let items = try? await asset.load(.commonMetadata) {
+            for item in items {
+                guard let key = item.commonKey else { continue }
+                let val = try? await item.load(.stringValue)
+                if key == .commonKeyTitle { m.title = val }
+                else if key == .commonKeyArtist { m.artist = val }
+                else if key == .commonKeyAlbumName { m.album = val }
+            }
+        }
+        if let dur = try? await asset.load(.duration), dur.seconds.isFinite { m.duration = dur.seconds }
+        return m
     }
 
     private func loadMetadata() {
@@ -150,26 +221,13 @@ final class Library: ObservableObject {
         if todo.isEmpty { return }
         Task {
             for t in todo {
-                let asset = AVURLAsset(url: t.url)
-                var title: String?
-                var artist: String?
-                var album: String?
-                if let items = try? await asset.load(.commonMetadata) {
-                    for item in items {
-                        guard let key = item.commonKey else { continue }
-                        let val = try? await item.load(.stringValue)
-                        if key == .commonKeyTitle { title = val }
-                        else if key == .commonKeyArtist { artist = val }
-                        else if key == .commonKeyAlbumName { album = val }
-                    }
-                }
-                let dur = (try? await asset.load(.duration))?.seconds ?? 0
+                let meta = await Library.readMetadata(t.url)
                 await MainActor.run {
                     if let i = self.tracks.firstIndex(where: { $0.id == t.id }) {
-                        if let title, !title.isEmpty { self.tracks[i].title = title }
-                        self.tracks[i].artist = artist ?? "Unknown artist"
-                        self.tracks[i].album = album ?? "Unknown album"
-                        self.tracks[i].duration = dur.isFinite ? dur : 0
+                        if let title = meta.title, !title.isEmpty { self.tracks[i].title = title }
+                        self.tracks[i].artist = meta.artist ?? "Unknown artist"
+                        self.tracks[i].album = meta.album ?? "Unknown album"
+                        self.tracks[i].duration = meta.duration
                     }
                 }
             }
