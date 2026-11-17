@@ -37,9 +37,14 @@ final class AudioPlayer: ObservableObject {
             .appendingPathComponent("presets.json")
     }
 
+    private func activateSession() {
+        let s = AVAudioSession.sharedInstance()
+        try? s.setCategory(.playback, mode: .default)
+        try? s.setActive(true)
+    }
+
     init() {
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        activateSession()
         engine.attach(node)
         engine.attach(eq)
         if let d = try? Data(contentsOf: presetsURL),
@@ -56,10 +61,19 @@ final class AudioPlayer: ObservableObject {
             } else if let o = n.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt,
                       AVAudioSession.InterruptionOptions(rawValue: o).contains(.shouldResume),
                       self.file != nil {
+                self.activateSession()
                 try? self.engine.start()
                 self.node.play()
                 self.isPlaying = true
             }
+        }
+        // Headphones plugged/unplugged, sample rate change, etc. stop the engine; restart and resume.
+        NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
+                                               object: engine, queue: .main) { [weak self] _ in
+            guard let self, self.file != nil else { return }
+            let pos = self.position
+            try? self.engine.start()
+            self.seek(to: pos)
         }
     }
 
@@ -97,6 +111,7 @@ final class AudioPlayer: ObservableObject {
         guard queue.indices.contains(i) else { return }
         let t = queue[i]
         do {
+            activateSession()
             let f = try AVAudioFile(forReading: t.url)
             generation += 1
             node.stop()
@@ -118,6 +133,7 @@ final class AudioPlayer: ObservableObject {
             startTimer()
             updateNowPlaying()
         } catch {
+            isPlaying = false
             message = "Could not play \(t.title): \(error.localizedDescription)"
         }
     }
@@ -144,6 +160,7 @@ final class AudioPlayer: ObservableObject {
             node.pause()
             isPlaying = false
         } else {
+            activateSession()
             if !engine.isRunning { try? engine.start() }
             node.play()
             isPlaying = true
@@ -179,18 +196,23 @@ final class AudioPlayer: ObservableObject {
         seekOffset = max(0, min(s, duration))
         position = seekOffset
         schedule(from: seekOffset)
-        if was { node.play() }
+        if was {
+            if !engine.isRunning { try? engine.start() }
+            node.play()
+        }
         updateNowPlaying()
     }
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self, self.isPlaying,
-                  let t = self.node.lastRenderTime,
-                  let pt = self.node.playerTime(forNodeTime: t) else { return }
+                  let rt = self.node.lastRenderTime,
+                  let pt = self.node.playerTime(forNodeTime: rt) else { return }
             self.position = min(self.duration, self.seekOffset + Double(pt.sampleTime) / pt.sampleRate)
         }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     // MARK: Lock screen / control center
@@ -272,12 +294,29 @@ final class AudioPlayer: ObservableObject {
     func importPreset(_ url: URL) {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { message = "Could not read preset file."; return }
-        let ext = url.pathExtension.lowercased()
+        var raw: Data?
+        var coordError: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordError) { readURL in
+            raw = try? Data(contentsOf: readURL)
+        }
+        guard let data = raw, !data.isEmpty else { message = "Could not read preset file."; return }
         let name = url.deletingPathExtension().lastPathComponent
-        let p = ext == "json"
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(decoding: data, as: UTF8.self)
+        var trimSet = CharacterSet.whitespacesAndNewlines
+        trimSet.insert(charactersIn: "\u{FEFF}")
+        let isJSON = text.trimmingCharacters(in: trimSet).hasPrefix("{")
+        let p = isJSON
             ? PresetParser.easyEffects(data, name: name)
-            : PresetParser.autoEQ(String(decoding: data, as: UTF8.self), name: name)
-        if let p { store(p); apply(p) } else { message = "No equalizer bands found in that file." }
+            : PresetParser.autoEQ(text, name: name)
+        if let p {
+            store(p)
+            apply(p)
+            let pre = String(format: "%.1f", p.preamp)
+            message = "Loaded preset \(p.name): \(p.bands.count) bands, preamp \(pre) dB."
+        } else {
+            message = "No equalizer bands found in that file."
+        }
     }
 }
